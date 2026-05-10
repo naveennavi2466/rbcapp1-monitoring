@@ -1,0 +1,58 @@
+---
+- name: rbcapp1 monitoring playbook
+  hosts: all_app_servers
+  become: yes
+
+  tasks:
+
+    - name: check if httpd is installed
+      command: rpm -q httpd
+      register: httpd_check
+      ignore_errors: yes
+      when: action == "verify_install" and inventory_hostname in groups["httpd_servers"]
+
+    - name: install httpd if not there
+      yum:
+        name: httpd
+        state: present
+      when: action == "verify_install" and inventory_hostname in groups["httpd_servers"] and httpd_check.rc != 0
+
+    - name: start httpd service
+      service:
+        name: httpd
+        state: started
+        enabled: yes
+      when: action == "verify_install" and inventory_hostname in groups["httpd_servers"] and httpd_check.rc != 0
+
+    - name: get disk usage numbers
+      shell: df -h | awk 'NR>1 {gsub(/%/,"",$5); if($5+0 > 80) print $5"% on "$6}'
+      register: high_disk
+      when: action == "check-disk"
+
+    - name: email alert if disk is over 80
+      mail:
+        to: "{{ alert_email }}"
+        subject: "disk alert on {{ inventory_hostname }}"
+        body: "{{ high_disk.stdout }}"
+      when: action == "check-disk" and high_disk.stdout != ""
+
+    - name: call the healthcheck api
+      uri:
+        url: "{{ healthcheck_api }}"
+        method: GET
+      register: api_result
+      delegate_to: localhost
+      run_once: yes
+      when: action == "check-status"
+
+    - name: print app status
+      debug:
+        msg: "rbcapp1 is {{ api_result.json.application_status }}"
+      run_once: yes
+      when: action == "check-status"
+
+    - name: show down services
+      debug:
+        msg: "down: {{ api_result.json.services | dict2items | selectattr('value','eq','DOWN') | map(attribute='key') | list }}"
+      run_once: yes
+      when: action == "check-status" and api_result.json.application_status == "DOWN"
